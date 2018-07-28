@@ -37,6 +37,14 @@ def restricted(func):
         return func(bot, update, *args, **kwargs)
     return wrapped
 
+def admin(func):
+    @functools.wraps(func)
+    def wrapped(bot, update, *args, **kwargs):
+        if update.effective_user.id != CONFIG["admin"]["id"]:
+            return
+        return func(bot, update, *args, **kwargs)
+    return wrapped
+
 def private(func):
     @functools.wraps(func)
     def wrapped(bot, update, *args, **kwargs):
@@ -70,7 +78,7 @@ def command_start(bot, update):
             )
             update.message.reply_text("An admin has been notified")
 
-@restricted
+@admin
 @private
 def command_status(bot, update):
     update.message.reply_text(yaml.dump(CONFIG))
@@ -90,11 +98,15 @@ def command_menu(bot, update):
     )
 
 @restricted
-@private
 @telegram.ext.dispatcher.run_async
 def command_ytaudio(bot, update):
     afmt = "mp3"
-    url = update.message.text.split(" ", 1)[1]
+    try:
+        (cmd, url, *_) = update.message.text.split(" ")
+    except ValueError:
+        update.message.reply_text("usage: cmd url")
+        return
+
     bot.send_chat_action(chat_id=update.message.chat_id,
                          action=telegram.ChatAction.TYPING)
     with tempfile.TemporaryDirectory() as tempdir:
