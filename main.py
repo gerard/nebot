@@ -4,10 +4,12 @@ import os
 import subprocess
 import functools
 import glob
-import yaml
-import logging
-import telegram.ext
+import textwrap
 import tempfile
+import logging
+import yaml
+import telegram.ext
+
 
 CARCAMAL_BOT_TOKEN = os.path.join(
     os.getenv("HOME"),
@@ -77,6 +79,7 @@ def command_start(bot, update):
                 )
             )
             update.message.reply_text("An admin has been notified")
+    update.message.reply_text("Use /help command to see what this bot can do")
 
 @admin
 @private
@@ -102,23 +105,27 @@ def command_menu(bot, update):
 def command_ytaudio(bot, update):
     afmt = "mp3"
     try:
-        (cmd, url, *_) = update.message.text.split(" ")
+        (_, url, *_) = update.message.text.split(" ")
     except ValueError:
-        update.message.reply_text("usage: cmd url")
+        update.message.reply_text("usage: /ytaudio url")
         return
 
     bot.send_chat_action(chat_id=update.message.chat_id,
                          action=telegram.ChatAction.TYPING)
     with tempfile.TemporaryDirectory() as tempdir:
-        subprocess.check_call([
-            "youtube-dl",
-            "--audio-format", afmt,
-            "-o", os.path.join(tempdir, "%(title)s.%(ext)s"),
-            "-x", url
-        ])
-        afname = glob.glob(os.path.join(tempdir, "*.{}".format(afmt)))[0]
-        bot.send_audio(chat_id=update.message.chat_id,
-                       audio=open(afname, "rb"))
+        try:
+            subprocess.check_call([
+                "youtube-dl",
+                "--audio-format", afmt,
+                "-o", os.path.join(tempdir, "%(title)s.%(ext)s"),
+                "-x", url
+            ])
+        except subprocess.CalledProcessError:
+            update.message.reply_text("Download failed... bad URL?")
+        else:
+            afname = glob.glob(os.path.join(tempdir, "*.{}".format(afmt)))[0]
+            bot.send_audio(chat_id=update.message.chat_id,
+                           audio=open(afname, "rb"))
 
 shop_lists = {}
 def command_shopadd(bot, update):
@@ -148,6 +155,23 @@ def command_shoplist(bot, update):
                          text=" * {}".format(item))
     bot.send_message(chat_id=update.message.chat_id,
                      text="shoplist: done")
+
+def command_help(bot, update):
+    help_msg = textwrap.dedent(
+        """
+        *List of available commands*
+        /fortune - print a random, hopefully interesting, adage
+
+        *Registered users only*
+        /ytaudio <url> - obtain an mp3 from a youtube link
+
+        *Source code*
+        https://github.com/gerard/nebot
+        """
+    )
+    bot.send_message(chat_id=update.message.chat_id,
+                     text=help_msg,
+                     parse_mode=telegram.ParseMode.MARKDOWN)
 
 
 def main():
