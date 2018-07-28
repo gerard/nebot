@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pylint: disable=missing-docstring
 
 import os
 import subprocess
@@ -7,10 +8,12 @@ import glob
 import textwrap
 import tempfile
 import logging
+import pickle
 import yaml
-import telegram.ext
+import telegram as tgm
+import telegram.ext as tgme
 
-
+### Globals
 CARCAMAL_BOT_TOKEN = os.path.join(
     os.getenv("HOME"),
     ".carcamalbot.telegram.token"
@@ -21,10 +24,11 @@ CARCAMAL_BOT_CONFIG = os.path.join(
     ".carcamalbot.config.yaml"
 )
 
-with open(CARCAMAL_BOT_CONFIG) as f:
-    CONFIG = yaml.load(f)
+with open(CARCAMAL_BOT_CONFIG) as config_f:
+    CONFIG = yaml.load(config_f)
 
 
+### Access decorators
 def restricted(func):
     @functools.wraps(func)
     def wrapped(bot, update, *args, **kwargs):
@@ -34,7 +38,7 @@ def restricted(func):
             bot.send_message(chat_id=update.message.chat_id,
                              text="Unauthorized, please send command /start "
                                   "and wait for an admin to accept your request",
-                             parse_mode=telegram.ParseMode.MARKDOWN)
+                             parse_mode=tgm.ParseMode.MARKDOWN)
             return
         return func(bot, update, *args, **kwargs)
     return wrapped
@@ -50,13 +54,14 @@ def admin(func):
 def private(func):
     @functools.wraps(func)
     def wrapped(bot, update, *args, **kwargs):
-        if bot.getChat(update.message.chat_id).type != telegram.Chat.PRIVATE:
+        if bot.getChat(update.message.chat_id).type != tgm.Chat.PRIVATE:
             update.message.reply_text("This command is for private chats only")
             return
         return func(bot, update, *args, **kwargs)
     return wrapped
 
 
+### Administration
 @private
 def command_start(bot, update):
     uid = update.effective_user.id
@@ -72,7 +77,7 @@ def command_start(bot, update):
         if "chat_id" in CONFIG["admin"]:
             bot.send_message(
                 chat_id=CONFIG["admin"]["chat_id"],
-                parse_mode=telegram.ParseMode.MARKDOWN,
+                parse_mode=tgm.ParseMode.MARKDOWN,
                 text="[{user}](tg://user?id={uid}) with id:{uid} has /start ed the bot".format(
                     user=update.effective_user.first_name,
                     uid=uid
@@ -86,22 +91,17 @@ def command_start(bot, update):
 def command_status(bot, update):
     update.message.reply_text(yaml.dump(CONFIG))
 
+
+### Fortune
 def command_fortune(bot, update):
     msg = subprocess.check_output("fortune").decode("utf-8")
     bot.send_message(chat_id=update.message.chat_id,
                      text=msg)
 
-def command_menu(bot, update):
-    reply_markup = telegram.ReplyKeyboardMarkup(
-        [["A", "B", "C", "D"]]
-    )
-    bot.send_message(chat_id=update.message.chat_id,
-                     text="Pick an option",
-                     reply_markup=reply_markup
-    )
 
+### Youtube
 @restricted
-@telegram.ext.dispatcher.run_async
+@tgme.dispatcher.run_async
 def command_ytaudio(bot, update):
     afmt = "mp3"
     try:
@@ -111,7 +111,7 @@ def command_ytaudio(bot, update):
         return
 
     bot.send_chat_action(chat_id=update.message.chat_id,
-                         action=telegram.ChatAction.TYPING)
+                         action=tgm.ChatAction.TYPING)
     with tempfile.TemporaryDirectory() as tempdir:
         try:
             subprocess.check_call([
@@ -127,35 +127,150 @@ def command_ytaudio(bot, update):
             bot.send_audio(chat_id=update.message.chat_id,
                            audio=open(afname, "rb"))
 
-shop_lists = {}
-def command_shopadd(bot, update):
-    reply_markup = telegram.ReplyKeyboardRemove()
-    uid = update.message.from_user.id
-    if uid not in shop_lists:
-        shop_lists[uid] = {}
 
-    try:
-        item = update.message.text.split(" ", 1)[1].strip()
-    except IndexError:
-        msg = "usage: /shopadd <item>"
-    else:
-        shop_lists[uid][item] = True
-        msg = "shoplist: added {}".format(item)
+### Groceries
+class GroceriesOperation:
+    def __init__(self, oid, name, next_state, msg):
+        self.oid = oid
+        self.name = name
+        self.next_state = next_state
+        self.msg = msg
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+class GroceriesState:
+    def __init__(self, name, transitions):
+        self.name = name
+        self.transitions = transitions
+
+    def transition_names(self):
+        return [x.name for x in self.transitions]
+
+    def transition_regex(self):
+        return "^{}$".format("|".join(self.transition_names()))
+
+class GroceriesStateMachine:
+    ADDING = GroceriesState("ADDING", [])
+    REMOVING = GroceriesState("REMOVING", [])
+    START = GroceriesState(
+        "START",
+        [
+            GroceriesOperation(
+                "ADDING",
+                "Add to groceries list",
+                ADDING,
+                "What item do you want to add?",
+            ),
+            GroceriesOperation(
+                "REMOVING",
+                "Remove from groceries list",
+                REMOVING,
+                "What item do you want to remove?",
+            ),
+            GroceriesOperation(
+                "EXITING",
+                "Exit groceries list mode",
+                tgme.ConversationHandler.END,
+                "Good bye!"
+            )
+        ]
+    )
+
+@private
+@restricted
+def conv_groceries_entry(bot, update, user_data):
+    reply_markup = tgm.ReplyKeyboardMarkup(
+        [[x] for x in GroceriesStateMachine.START.transition_names()],
+        one_time_keyboard=True
+    )
+
+    uid = update.effective_user.id
+    pickle_file = os.path.join(
+        os.getenv("HOME"),
+        ".carcamalbot.pickle.groceries.{}".format(uid)
+    )
+
+    if not user_data and os.path.exists(pickle_file):
+        # If we didn't get any user_data but pickle exists, load it.
+        with open(pickle_file, "rb") as f:
+            user_data.update(pickle.load(f))
+
+    # Store any data we have
+    with open(pickle_file, "wb") as f:
+        pickle.dump(user_data, f)
+
+    list_items = []
+    for (k, state) in user_data.items():
+        if state:
+            list_items.append(k)
+
+    msg = ""
+    if list_items:
+        msg += "*The list contains:*"
+        for i in list_items:
+            msg += "\n  - {}".format(i)
+        msg += "\n"
+    msg += "*Select an action*"
 
     bot.send_message(chat_id=update.message.chat_id,
                      text=msg,
+                     parse_mode=tgm.ParseMode.MARKDOWN,
                      reply_markup=reply_markup)
 
-def command_shoplist(bot, update):
-    bot.send_message(chat_id=update.message.chat_id,
-                     text="shoplist: your shoplist contains:")
+    return GroceriesStateMachine.START
 
-    for item in shop_lists[update.message.from_user.id].keys():
-        bot.send_message(chat_id=update.message.chat_id,
-                         text=" * {}".format(item))
-    bot.send_message(chat_id=update.message.chat_id,
-                     text="shoplist: done")
+def conv_groceries_start(bot, update, user_data):
+    for trans in GroceriesStateMachine.START.transitions:
+        if trans.name == update.message.text.strip():
+            opts = None
+            if trans.oid == "ADDING":
+                opts = [[k] for (k, v) in user_data.items() if v == False]
+            elif trans.oid == "REMOVING":
+                opts = [[k] for (k, v) in user_data.items() if v == True]
 
+            if opts:
+                reply_markup = tgm.ReplyKeyboardMarkup(
+                    opts, one_time_keyboard=True
+                )
+                bot.send_message(chat_id=update.message.chat_id,
+                                 text=trans.msg,
+                                 reply_markup=reply_markup)
+            else:
+                bot.send_message(chat_id=update.message.chat_id,
+                                 text=trans.msg)
+
+            return trans.next_state
+    return GroceriesStateMachine.START
+
+def conv_groceries_adding(bot, update, user_data):
+    item = update.message.text.strip()
+    user_data[update.message.text.strip()] = True
+    bot.send_message(
+        chat_id=update.message.chat_id,
+        text="{} added to groceries".format(item)
+    )
+
+    return conv_groceries_entry(bot, update, user_data)
+
+def conv_groceries_removing(bot, update, user_data):
+    item = update.message.text.strip()
+    if item in user_data:
+        user_data[update.message.text.strip()] = False
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text="{} added to groceries".format(item)
+        )
+    else:
+        bot.send_message(
+            chat_id=update.message.chat_id,
+            text="{} was not found in your groceries".format(item)
+        )
+
+    return conv_groceries_entry(bot, update, user_data)
+
+
+### Help
 def command_help(bot, update):
     help_msg = textwrap.dedent(
         """
@@ -164,6 +279,7 @@ def command_help(bot, update):
 
         *Registered users only*
         /ytaudio <url> - obtain an mp3 from a youtube link
+        /groceries - start groceries list mode
 
         *Source code*
         https://github.com/gerard/nebot
@@ -171,9 +287,10 @@ def command_help(bot, update):
     )
     bot.send_message(chat_id=update.message.chat_id,
                      text=help_msg,
-                     parse_mode=telegram.ParseMode.MARKDOWN)
+                     parse_mode=tgm.ParseMode.MARKDOWN)
 
 
+### Main
 def main():
     with open(CARCAMAL_BOT_TOKEN) as f:
         token = f.read().strip()
@@ -181,16 +298,53 @@ def main():
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         level=logging.INFO)
 
-    updater = telegram.ext.Updater(token=token)
+    updater = tgme.Updater(token=token)
     for gl_k, gl_v in globals().items():
         if not gl_k.startswith("command_"):
             continue
 
         updater.dispatcher.add_handler(
-            telegram.ext.CommandHandler(gl_k.split("_", 1)[1], gl_v)
+            tgme.CommandHandler(gl_k.split("_", 1)[1], gl_v)
+        )
+
+        updater.dispatcher.add_handler(
+            tgme.ConversationHandler(
+                entry_points=[
+                    tgme.CommandHandler(
+                        "groceries",
+                        conv_groceries_entry,
+                        pass_user_data=True
+                    )
+                ],
+                states={
+                    GroceriesStateMachine.START: [
+                        tgme.RegexHandler(
+                            GroceriesStateMachine.START.transition_regex(),
+                            conv_groceries_start,
+                            pass_user_data=True
+                        )
+                    ],
+                    GroceriesStateMachine.ADDING: [
+                        tgme.MessageHandler(
+                            tgme.Filters.text,
+                            conv_groceries_adding,
+                            pass_user_data=True
+                        )
+                    ],
+                    GroceriesStateMachine.REMOVING: [
+                        tgme.MessageHandler(
+                            tgme.Filters.text,
+                            conv_groceries_removing,
+                            pass_user_data=True
+                        )
+                    ]
+                },
+                fallbacks=[],
+            )
         )
 
     updater.start_polling()
+    updater.idle()
 
 
 if __name__ == "__main__":
